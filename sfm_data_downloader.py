@@ -6,9 +6,39 @@ from tkinter import messagebox, ttk
 from PIL import Image
 import json
 import configparser
-import base64
+import piexif
+import base64, mapbox_vector_tile
+import numpy as np
+import random
+import cv2 
+from dictknife import deepmerge
+from queue import Queue
+import shutil
 
 sequence_entries = []
+is_cancelled = False
+update_queue = Queue()
+
+def add_gps_info_to_image_data(latitude, longitude):
+    def convert_to_degrees(value):
+        d = int(value)
+        m = int((value - d) * 60)
+        s = (value - d - m/60) * 3600
+        return d, m, s
+
+    lat_deg = convert_to_degrees(latitude)
+    lon_deg = convert_to_degrees(longitude)
+
+    gps_ifd = {
+        piexif.GPSIFD.GPSLatitudeRef: 'N' if latitude >= 0 else 'S',
+        piexif.GPSIFD.GPSLatitude: [(lat_deg[0], 1), (lat_deg[1], 1), (int(lat_deg[2]*100), 100)],
+        piexif.GPSIFD.GPSLongitudeRef: 'E' if longitude >= 0 else 'W',
+        piexif.GPSIFD.GPSLongitude: [(lon_deg[0], 1), (lon_deg[1], 1), (int(lon_deg[2]*100), 100)],
+    }
+
+    exif_dict = {"GPS": gps_ifd}
+    exif_bytes = piexif.dump(exif_dict)
+    return exif_bytes
 
 def save_token_to_ini(access_token, file_path='token.ini'):
     config = configparser.ConfigParser()
@@ -21,7 +51,41 @@ def read_token_from_ini(file_path='token.ini'):
     config.read(file_path)
     return config['DEFAULT'].get('Access_Token', None)
 
-def download_function(access_token, sequence_id, progress_var, sequence_num):
+# マージと画像ファイルの移動を行う関数
+def merge_and_move_files(sequence_ids):
+    merged_data = []
+    merged_data_dir = "merged"
+    merged_image_dir = "merged/images"
+    if not os.path.exists(merged_data_dir):
+        os.makedirs(merged_data_dir)
+    if not os.path.exists(merged_image_dir):
+        os.makedirs(merged_image_dir)
+
+    # JSONファイルのマージ
+    for sequence_id in sequence_ids:
+        file_path = os.path.join(sequence_id, "reconstruction.json")
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as file:
+                data = json.load(file)
+                merged_data = merged_data + data
+                os.remove(file_path)
+    for sequence_id in sequence_ids:
+        image_dir = os.path.join(sequence_id, 'images')
+        if os.path.exists(image_dir):
+            for image_file in os.listdir(image_dir):
+                src_path = os.path.join(image_dir, image_file)
+                dst_path = os.path.join(merged_image_dir, image_file)
+                if os.path.exists(dst_path):  
+                    os.remove(dst_path)
+                shutil.move(src_path, dst_path)
+        shutil.rmtree(sequence_id)
+
+    # マージされた JSON データを保存
+    with open('merged/reconstruction.json', 'w') as file:
+        json.dump(merged_data, file, indent=2)
+
+
+def download_function(access_token, sequence_id, progress_var, sequence_num, download_mask):
     save_token_to_ini(access_token)
     header = {'Authorization': 'OAuth {}'.format(access_token)}
     try:
@@ -29,26 +93,46 @@ def download_function(access_token, sequence_id, progress_var, sequence_num):
         sequence_response = requests.get(sequence_url, headers=header)
         sequence_response.raise_for_status()
         sequence_response_json = sequence_response.json()
-        total_images = len(sequence_response_json["data"])  # 画像の総数を取得
+        total_images = len(sequence_response_json["data"]) 
         image_dir = os.path.join(sequence_id, 'images')
-        distoted_image_dir = os.path.join(sequence_id, 'images_distorted')
+        if not os.path.exists(sequence_id):
+            os.makedirs(sequence_id)
         for index, img_id in enumerate(sequence_response_json["data"]):
-            image_info_url = 'https://graph.mapillary.com/{}?fields=thumb_original_url, captured_at, is_pano'.format(img_id["id"])
+            image_info_url = 'https://graph.mapillary.com/{}?fields=thumb_original_url, captured_at, is_pano, geometry'.format(img_id["id"])
+            geometry_info_url = 'https://graph.mapillary.com/{}/detections?access_token={}&fields=geometry'.format(img_id["id"], access_token)
             img_response = requests.get(image_info_url, headers=header)
+            geometry_response = requests.get(geometry_info_url, headers=header)
             img_response.raise_for_status()
             img_response_json = img_response.json()
+            geometry_response_json = geometry_response.json()
             image_name = int(img_response_json["captured_at"])
             image_get_url = img_response_json['thumb_original_url']
             image_bytes = requests.get(image_get_url, stream=True).content
+            exif_bytes = add_gps_info_to_image_data(img_response_json['geometry']['coordinates'][1], img_response_json['geometry']['coordinates'][0])
             image = Image.open(BytesIO(image_bytes))
+            width, height = image.size
             if img_response_json["is_pano"]:
                 if not os.path.exists(image_dir):
                     os.makedirs(image_dir)
-                image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)))
+                image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
             else:
-                if not os.path.exists(distoted_image_dir):
-                    os.makedirs(distoted_image_dir)
-                image.save(os.path.join(distoted_image_dir, '{}.jpg'.format(image_name)))
+                if not os.path.exists(image_dir):
+                    os.makedirs(image_dir)
+                image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
+            if download_mask:
+                mask = np.zeros((height, width, 3), dtype=np.uint8)
+                mask_dir = os.path.join(sequence_id, 'mask')
+                if not os.path.exists(mask_dir):
+                    os.makedirs(mask_dir)
+                for geometry in geometry_response_json['data']:
+                    base64_string = geometry['geometry']
+                    vector_data = base64.decodebytes(base64_string.encode('utf-8'))
+                    decoded_geometry = mapbox_vector_tile.decode(vector_data)
+                    detection_coordinates = decoded_geometry['mpy-or']['features'][0]['geometry']['coordinates'][0]
+                    pixel_coords = np.array([[int(x/4096 * height), int(y/4096 * width)] for x, y in detection_coordinates])
+                    color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                    cv2.fillPoly(mask, [pixel_coords], color)
+                cv2.imwrite(os.path.join(mask_dir, '{}.jpg'.format(image_name)), mask)
             current_progress = (index + 1) / total_images * 100
             progress_label.config(text=f"sec {sequence_num}: {index + 1}/{total_images} ({current_progress:.2f}%)")
             progress_var.set((index + 1) / total_images * 100)
@@ -60,7 +144,7 @@ def download_function(access_token, sequence_id, progress_var, sequence_num):
         sfm_cluster_url = response_json["sfm_cluster"]["url"]
         sfm_data_zlib = requests.get(sfm_cluster_url, stream=True).content
         sfm_data = zlib.decompress(sfm_data_zlib)
-        sfm_data_json = json.loads(sfm_data.decode('utf-8'))  # zlibから解凍したバイナリデータを文字列に変換し、JSONにパースする
+        sfm_data_json = json.loads(sfm_data.decode('utf-8'))
         temp_shots = {}
         for _, shot_data in sfm_data_json[0]['shots'].items():
             new_shot_id = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
@@ -71,7 +155,7 @@ def download_function(access_token, sequence_id, progress_var, sequence_num):
             with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
                 sfm_file.write(sfm_data_to_write)
         else:
-            with open(os.path.join(sequence_id, "reconstruction_distorted.json"), 'w') as sfm_file:
+            with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
                 sfm_file.write(sfm_data_to_write)
     except requests.exceptions.RequestException as e:
         print(f"Error downloading the image: {e}")
@@ -83,15 +167,23 @@ def add_entry_field():
 
 def on_download_clicked():
     access_token = entry_token.get()
-    for sequence_num, sequence_id in enumerate(sequence_entries):
-        sequence_id = sequence_id.get().strip()
+    download_mask = mask_var.get() == 1
+    should_merge = merge_var.get() == 1  # マージを行うかどうか
+
+    sequence_ids = [entry.get().strip() for entry in sequence_entries if entry.get().strip()]
+    for sequence_num, sequence_id in enumerate(sequence_ids):
         if sequence_id:
-            download_function(access_token, sequence_id, progress_var, sequence_num + 1)
-    messagebox.showinfo("Download Complete", "File download completed.")
+            download_function(access_token, sequence_id, progress_var, sequence_num + 1, download_mask)
+    
+    if should_merge and sequence_ids:
+        merge_and_move_files(sequence_ids)
+        messagebox.showinfo("Merge Complete", "Reconstruction files merged and images moved.")
+    else:
+        messagebox.showinfo("Download Complete", "File download completed.")
 
 # GUI setup
 root = tk.Tk()
-root.geometry('200x400')  # ウィンドウのサイズを調整
+root.geometry('200x500')
 root.title("Download Tool")
 
 label_token = tk.Label(root, text="Access Token(start from MLY):")
@@ -133,16 +225,23 @@ button_download = tk.Button(button_frame, text="Download", command=on_download_c
 button_download.pack(side='top', fill='x', expand=True)
 
 def add_entry_field():
-    # 新しいエントリーフィールドを追加
     new_entry = tk.Entry(sequence_container)
-    new_entry.pack()  # pack を使うとデフォルトで下に追加される
+    new_entry.pack() 
     sequence_entries.append(new_entry)
-    # スクロールバーの範囲を更新
     scrollable_sequence_canvas.configure(scrollregion=scrollable_sequence_canvas.bbox("all"))
-    # スクロールして新しいエントリーが見えるようにする
     scrollable_sequence_canvas.yview_moveto(1.0)
 
 button_add.config(command=add_entry_field)
+mask_var = tk.IntVar()
+
+checkbutton_mask = tk.Checkbutton(root, text="Download Mask", variable=mask_var)
+checkbutton_mask.pack()
+
+# マージするかどうかを制御するチェックボックスと変数
+merge_var = tk.IntVar()
+checkbutton_merge = tk.Checkbutton(root, text="Merge Files", variable=merge_var)
+checkbutton_merge.pack()
+
 
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(button_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var)
