@@ -146,8 +146,11 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
         sfm_data = zlib.decompress(sfm_data_zlib)
         sfm_data_json = json.loads(sfm_data.decode('utf-8'))
         temp_shots = {}
-        for _, shot_data in sfm_data_json[0]['shots'].items():
-            new_shot_id = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
+        for shot_id, shot_data in sfm_data_json[0]['shots'].items():
+            #new_shot_id = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
+            new_shot_id = shot_id + ".jpg"
+            org_image_name = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
+            shutil.move(os.path.join(image_dir, org_image_name), os.path.join(image_dir, new_shot_id))
             temp_shots[new_shot_id] = shot_data
         sfm_data_json[0]['shots'] = temp_shots
         sfm_data_to_write = json.dumps(sfm_data_json, indent=2, ensure_ascii=False)  # JSONデータを整形する
