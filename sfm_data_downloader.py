@@ -14,6 +14,7 @@ import cv2
 from dictknife import deepmerge
 from queue import Queue
 import shutil
+from equilib import Equi2Pers
 
 sequence_entries = []
 is_cancelled = False
@@ -84,8 +85,13 @@ def merge_and_move_files(sequence_ids):
     with open('merged/reconstruction.json', 'w') as file:
         json.dump(merged_data, file, indent=2)
 
+def equi2perspective(image, rots, height, width):
+    equi2pers = Equi2Pers(height=height, width=width, fov_x=90.0, mode="bilinear")
+    perspective_image = equi2pers(equi=image,rots=rots)
+    perspective_image = np.transpose(perspective_image, (1, 2, 0))
+    return perspective_image
 
-def download_function(access_token, sequence_id, progress_var, sequence_num, download_mask):
+def download_function(access_token, sequence_id, progress_var, sequence_num, download_mask, should_merge):
     save_token_to_ini(access_token)
     header = {'Authorization': 'OAuth {}'.format(access_token)}
     try:
@@ -98,7 +104,7 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
         if not os.path.exists(sequence_id):
             os.makedirs(sequence_id)
         for index, img_id in enumerate(sequence_response_json["data"]):
-            image_info_url = 'https://graph.mapillary.com/{}?fields=thumb_original_url, captured_at, is_pano, geometry'.format(img_id["id"])
+            image_info_url = 'https://graph.mapillary.com/{}?fields=thumb_original_url, captured_at, is_pano, geometry, camera_parameters, camera_type'.format(img_id["id"])
             geometry_info_url = 'https://graph.mapillary.com/{}/detections?access_token={}&fields=geometry'.format(img_id["id"], access_token)
             img_response = requests.get(image_info_url, headers=header)
             geometry_response = requests.get(geometry_info_url, headers=header)
@@ -114,11 +120,40 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
             if img_response_json["is_pano"]:
                 if not os.path.exists(image_dir):
                     os.makedirs(image_dir)
-                image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
+                if should_merge:
+                    if not os.path.exists(image_dir):
+                        os.makedirs(image_dir)
+                    image = np.asarray(image, dtype=np.uint8)
+                    image = np.transpose(image, (2, 0, 1))
+                    rots = {'roll': 0., 'pitch': 0, 'yaw': 0}
+                    rots_r = {'roll': 0., 'pitch': 0, 'yaw': - np.pi/2}
+                    rots_b = {'roll': 0., 'pitch': 0, 'yaw': np.pi}
+                    rots_l = {'roll': 0., 'pitch': 0, 'yaw': np.pi/2}
+                    perspective_image_f = equi2perspective(image,rots,int(width/4),int(width/4))
+                    perspective_image_r = equi2perspective(image,rots_r,int(width/4),int(width/4))
+                    perspective_image_b = equi2perspective(image,rots_b,int(width/4),int(width/4))
+                    perspective_image_l = equi2perspective(image,rots_l,int(width/4),int(width/4))
+                    perspective_image = cv2.hconcat([perspective_image_l, perspective_image_f, perspective_image_r, perspective_image_b])
+                    perspective_image_pil = Image.fromarray(perspective_image)
+                    perspective_image_pil.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
+                else:
+                    image_dir = os.path.join(sequence_id, 'images')
+                    image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
             else:
                 if not os.path.exists(image_dir):
                     os.makedirs(image_dir)
-                image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
+                if should_merge:
+                    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                    print(img_response_json['camera_parameters'])
+                    cameraMatrix = np.array([img_response_json['camera_parameters'][0] * width, 0 , width/2, 0, img_response_json['camera_parameters'][0] * width, height/2, 0, 0, 1]).reshape(3,3)
+                    distCoeff = np.array([img_response_json['camera_parameters'][1], img_response_json['camera_parameters'][2], 0, 0, 0])
+                    h, w = image_cv.shape[:2]
+                    newCameraMatrix, roi = cv2.getOptimalNewCameraMatrix(cameraMatrix, distCoeff, (w,h), 1, (w,h))
+                    undistorted_image = cv2.undistort(image_cv, cameraMatrix, distCoeff, None, newCameraMatrix)
+                    undistorted_image_pil = Image.fromarray(cv2.cvtColor(undistorted_image, cv2.COLOR_BGR2RGB))
+                    undistorted_image_pil.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
+                else:
+                    image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
             if download_mask:
                 mask = np.zeros((height, width, 3), dtype=np.uint8)
                 mask_dir = os.path.join(sequence_id, 'mask')
@@ -176,7 +211,7 @@ def on_download_clicked():
     sequence_ids = [entry.get().strip() for entry in sequence_entries if entry.get().strip()]
     for sequence_num, sequence_id in enumerate(sequence_ids):
         if sequence_id:
-            download_function(access_token, sequence_id, progress_var, sequence_num + 1, download_mask)
+            download_function(access_token, sequence_id, progress_var, sequence_num + 1, download_mask, should_merge)
     
     if should_merge and sequence_ids:
         merge_and_move_files(sequence_ids)
