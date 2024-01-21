@@ -144,7 +144,6 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
                     os.makedirs(image_dir)
                 if should_merge:
                     image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-                    print(img_response_json['camera_parameters'])
                     cameraMatrix = np.array([img_response_json['camera_parameters'][0] * width, 0 , width/2, 0, img_response_json['camera_parameters'][0] * width, height/2, 0, 0, 1]).reshape(3,3)
                     distCoeff = np.array([img_response_json['camera_parameters'][1], img_response_json['camera_parameters'][2], 0, 0, 0])
                     h, w = image_cv.shape[:2]
