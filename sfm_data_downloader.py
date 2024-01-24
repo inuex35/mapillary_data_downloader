@@ -12,7 +12,7 @@ import cv2
 from queue import Queue
 import shutil
 from opensfm_converter import panorama2cube_image
-
+import threading
 sequence_entries = []
 is_cancelled = False
 update_queue = Queue()
@@ -184,15 +184,25 @@ def on_download_clicked():
     should_merge = merge_var.get() == 1 
 
     sequence_ids = [entry.get().strip() for entry in sequence_entries if entry.get().strip()]
-    for sequence_num, sequence_id in enumerate(sequence_ids):
-        if sequence_id:
-            download_function(access_token, sequence_id, progress_var, sequence_num + 1, should_merge)
-    
-    if should_merge and sequence_ids:
-        merge_and_move_files(sequence_ids)
-        messagebox.showinfo("Download and Merge Complete", "File download completed and reconstruction files merged and images moved to merged folder.")
-    else:
-        messagebox.showinfo("Download Complete", "File download completed.")
+
+    def download_thread():
+        try:
+            for sequence_num, sequence_id in enumerate(sequence_ids):
+                if sequence_id:
+                    download_function(access_token, sequence_id, progress_var, sequence_num + 1, should_merge)
+            
+            if should_merge and sequence_ids:
+                merge_and_move_files(sequence_ids)
+                messagebox.showinfo("Merge Complete", "Reconstruction files merged and images moved.")
+            else:
+                messagebox.showinfo("Download Complete", "File download completed.")
+        finally:
+            button_download.config(state=tk.NORMAL)
+
+    button_download.config(state=tk.DISABLED)
+
+    thread = threading.Thread(target=download_thread)
+    thread.start()
 
 # GUI setup
 root = tk.Tk()
