@@ -11,7 +11,6 @@ import base64, mapbox_vector_tile
 import numpy as np
 import random
 import cv2 
-from dictknife import deepmerge
 from queue import Queue
 import shutil
 from equilib import Equi2Pers
@@ -52,7 +51,6 @@ def read_token_from_ini(file_path='token.ini'):
     config.read(file_path)
     return config['DEFAULT'].get('Access_Token', None)
 
-# マージと画像ファイルの移動を行う関数
 def merge_and_move_files(sequence_ids):
     merged_data = []
     merged_data_dir = "merged"
@@ -62,7 +60,6 @@ def merge_and_move_files(sequence_ids):
     if not os.path.exists(merged_image_dir):
         os.makedirs(merged_image_dir)
 
-    # JSONファイルのマージ
     for sequence_id in sequence_ids:
         file_path = os.path.join(sequence_id, "reconstruction.json")
         if os.path.exists(file_path):
@@ -81,7 +78,6 @@ def merge_and_move_files(sequence_ids):
                 shutil.move(src_path, dst_path)
         shutil.rmtree(sequence_id)
 
-    # マージされた JSON データを保存
     with open('merged/reconstruction.json', 'w') as file:
         json.dump(merged_data, file, indent=2)
 
@@ -148,7 +144,10 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
                     distCoeff = np.array([img_response_json['camera_parameters'][1], img_response_json['camera_parameters'][2], 0, 0, 0])
                     h, w = image_cv.shape[:2]
                     newCameraMatrix, roi = cv2.getOptimalNewCameraMatrix(cameraMatrix, distCoeff, (w,h), 1, (w,h))
+                    x, y, new_w, new_h = roi
                     undistorted_image = cv2.undistort(image_cv, cameraMatrix, distCoeff, None, newCameraMatrix)
+                    undistorted_image = undistorted_image[y:y+h, x:x+w]
+                    new_f = newCameraMatrix[0][0]
                     undistorted_image_pil = Image.fromarray(cv2.cvtColor(undistorted_image, cv2.COLOR_BGR2RGB))
                     undistorted_image_pil.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
                 else:
@@ -175,25 +174,34 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
         response = requests.get(image_url, headers=header)
         response.raise_for_status()
         response_json = response.json()
-        sfm_cluster_url = response_json["sfm_cluster"]["url"]
-        sfm_data_zlib = requests.get(sfm_cluster_url, stream=True).content
-        sfm_data = zlib.decompress(sfm_data_zlib)
-        sfm_data_json = json.loads(sfm_data.decode('utf-8'))
-        temp_shots = {}
-        for shot_id, shot_data in sfm_data_json[0]['shots'].items():
-            #new_shot_id = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
-            new_shot_id = shot_id + ".jpg"
-            org_image_name = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
-            shutil.move(os.path.join(image_dir, org_image_name), os.path.join(image_dir, new_shot_id))
-            temp_shots[new_shot_id] = shot_data
-        sfm_data_json[0]['shots'] = temp_shots
-        sfm_data_to_write = json.dumps(sfm_data_json, indent=2, ensure_ascii=False)  # JSONデータを整形する
-        if img_response_json["is_pano"]:
-            with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
-                sfm_file.write(sfm_data_to_write)
-        else:
-            with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
-                sfm_file.write(sfm_data_to_write)
+        try:
+            sfm_cluster_url = response_json["sfm_cluster"]["url"]
+            sfm_data_zlib = requests.get(sfm_cluster_url, stream=True).content
+            sfm_data = zlib.decompress(sfm_data_zlib)
+            sfm_data_json = json.loads(sfm_data.decode('utf-8'))
+            temp_shots = {}
+            for shot_id, shot_data in sfm_data_json[0]['shots'].items():
+                new_shot_id = shot_id + ".jpg"
+                org_image_name = str(int(shot_data["capture_time"] * 1000)) + ".jpg"
+                shutil.move(os.path.join(image_dir, org_image_name), os.path.join(image_dir, new_shot_id))
+                temp_shots[new_shot_id] = shot_data
+            sfm_data_json[0]['shots'] = temp_shots
+            tmp_cam_data = sfm_data_json[0]['cameras']
+            tmp_cam_data[shot_data["camera"]]["width"] = new_w
+            tmp_cam_data[shot_data["camera"]]["height"] = new_h
+            tmp_cam_data[shot_data["camera"]]["focal"] = new_f
+            tmp_cam_data[shot_data["camera"]]["k1"] = 0
+            tmp_cam_data[shot_data["camera"]]["k2"] = 0
+            sfm_data_json[0]['cameras'] = tmp_cam_data
+            sfm_data_to_write = json.dumps(sfm_data_json, indent=2, ensure_ascii=False)  # JSONデータを整形する
+            if img_response_json["is_pano"]:
+                with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
+                    sfm_file.write(sfm_data_to_write)
+            else:
+                with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
+                    sfm_file.write(sfm_data_to_write)
+        except Exception as e:
+            print(e)
     except requests.exceptions.RequestException as e:
         print(f"Error downloading the image: {e}")
 
