@@ -7,13 +7,11 @@ from PIL import Image
 import json
 import configparser
 import piexif
-import base64, mapbox_vector_tile
 import numpy as np
-import random
 import cv2 
 from queue import Queue
 import shutil
-from equilib import Equi2Pers
+from opensfm_converter import panorama2cube_image
 
 sequence_entries = []
 is_cancelled = False
@@ -66,28 +64,23 @@ def merge_and_move_files(sequence_ids):
             with open(file_path, 'r') as file:
                 data = json.load(file)
                 merged_data = merged_data + data
-                os.remove(file_path)
     for sequence_id in sequence_ids:
         image_dir = os.path.join(sequence_id, 'images')
         if os.path.exists(image_dir):
             for image_file in os.listdir(image_dir):
                 src_path = os.path.join(image_dir, image_file)
                 dst_path = os.path.join(merged_image_dir, image_file)
-                if os.path.exists(dst_path):  
-                    os.remove(dst_path)
                 shutil.move(src_path, dst_path)
         shutil.rmtree(sequence_id)
 
     with open('merged/reconstruction.json', 'w') as file:
         json.dump(merged_data, file, indent=2)
 
-def equi2perspective(image, rots, height, width):
-    equi2pers = Equi2Pers(height=height, width=width, fov_x=90.0, mode="bilinear")
-    perspective_image = equi2pers(equi=image,rots=rots)
-    perspective_image = np.transpose(perspective_image, (1, 2, 0))
-    return perspective_image
+def equi2perspective(image):
+    equi2pers = panorama2cube_image(image)
 
-def download_function(access_token, sequence_id, progress_var, sequence_num, download_mask, should_merge):
+
+def download_function(access_token, sequence_id, progress_var, sequence_num, should_merge):
     save_token_to_ini(access_token)
     header = {'Authorization': 'OAuth {}'.format(access_token)}
     try:
@@ -119,19 +112,8 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
                 if should_merge:
                     if not os.path.exists(image_dir):
                         os.makedirs(image_dir)
-                    image = np.asarray(image, dtype=np.uint8)
-                    image = np.transpose(image, (2, 0, 1))
-                    rots = {'roll': 0., 'pitch': 0, 'yaw': 0}
-                    rots_r = {'roll': 0., 'pitch': 0, 'yaw': - np.pi/2}
-                    rots_b = {'roll': 0., 'pitch': 0, 'yaw': np.pi}
-                    rots_l = {'roll': 0., 'pitch': 0, 'yaw': np.pi/2}
-                    perspective_image_f = equi2perspective(image,rots,int(width/4),int(width/4))
-                    perspective_image_r = equi2perspective(image,rots_r,int(width/4),int(width/4))
-                    perspective_image_b = equi2perspective(image,rots_b,int(width/4),int(width/4))
-                    perspective_image_l = equi2perspective(image,rots_l,int(width/4),int(width/4))
-                    perspective_image = cv2.hconcat([perspective_image_l, perspective_image_f, perspective_image_r, perspective_image_b])
-                    perspective_image_pil = Image.fromarray(perspective_image)
-                    perspective_image_pil.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
+                    image = panorama2cube_image(image)
+                    image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
                 else:
                     image_dir = os.path.join(sequence_id, 'images')
                     image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
@@ -152,20 +134,6 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
                     undistorted_image_pil.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
                 else:
                     image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
-            if download_mask:
-                mask = np.zeros((height, width, 3), dtype=np.uint8)
-                mask_dir = os.path.join(sequence_id, 'mask')
-                if not os.path.exists(mask_dir):
-                    os.makedirs(mask_dir)
-                for geometry in geometry_response_json['data']:
-                    base64_string = geometry['geometry']
-                    vector_data = base64.decodebytes(base64_string.encode('utf-8'))
-                    decoded_geometry = mapbox_vector_tile.decode(vector_data)
-                    detection_coordinates = decoded_geometry['mpy-or']['features'][0]['geometry']['coordinates'][0]
-                    pixel_coords = np.array([[int(x/4096 * height), int(y/4096 * width)] for x, y in detection_coordinates])
-                    color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-                    cv2.fillPoly(mask, [pixel_coords], color)
-                cv2.imwrite(os.path.join(mask_dir, '{}.jpg'.format(image_name)), mask)
             current_progress = (index + 1) / total_images * 100
             progress_label.config(text=f"sec {sequence_num}: {index + 1}/{total_images} ({current_progress:.2f}%)")
             progress_var.set((index + 1) / total_images * 100)
@@ -186,13 +154,14 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, dow
                 shutil.move(os.path.join(image_dir, org_image_name), os.path.join(image_dir, new_shot_id))
                 temp_shots[new_shot_id] = shot_data
             sfm_data_json[0]['shots'] = temp_shots
-            tmp_cam_data = sfm_data_json[0]['cameras']
-            tmp_cam_data[shot_data["camera"]]["width"] = new_w
-            tmp_cam_data[shot_data["camera"]]["height"] = new_h
-            tmp_cam_data[shot_data["camera"]]["focal"] = new_f
-            tmp_cam_data[shot_data["camera"]]["k1"] = 0
-            tmp_cam_data[shot_data["camera"]]["k2"] = 0
-            sfm_data_json[0]['cameras'] = tmp_cam_data
+            if not img_response_json["is_pano"]:
+                tmp_cam_data = sfm_data_json[0]['cameras']
+                tmp_cam_data[shot_data["camera"]]["width"] = new_w
+                tmp_cam_data[shot_data["camera"]]["height"] = new_h
+                tmp_cam_data[shot_data["camera"]]["focal"] = new_f
+                tmp_cam_data[shot_data["camera"]]["k1"] = 0
+                tmp_cam_data[shot_data["camera"]]["k2"] = 0
+                sfm_data_json[0]['cameras'] = tmp_cam_data
             sfm_data_to_write = json.dumps(sfm_data_json, indent=2, ensure_ascii=False)  # JSONデータを整形する
             if img_response_json["is_pano"]:
                 with open(os.path.join(sequence_id, "reconstruction.json"), 'w') as sfm_file:
@@ -212,17 +181,16 @@ def add_entry_field():
 
 def on_download_clicked():
     access_token = entry_token.get()
-    download_mask = mask_var.get() == 1
-    should_merge = merge_var.get() == 1  # マージを行うかどうか
+    should_merge = merge_var.get() == 1 
 
     sequence_ids = [entry.get().strip() for entry in sequence_entries if entry.get().strip()]
     for sequence_num, sequence_id in enumerate(sequence_ids):
         if sequence_id:
-            download_function(access_token, sequence_id, progress_var, sequence_num + 1, download_mask, should_merge)
+            download_function(access_token, sequence_id, progress_var, sequence_num + 1, should_merge)
     
     if should_merge and sequence_ids:
         merge_and_move_files(sequence_ids)
-        messagebox.showinfo("Merge Complete", "Reconstruction files merged and images moved.")
+        messagebox.showinfo("Download and Merge Complete", "File download completed and reconstruction files merged and images moved to merged folder.")
     else:
         messagebox.showinfo("Download Complete", "File download completed.")
 
@@ -279,10 +247,6 @@ def add_entry_field():
 button_add.config(command=add_entry_field)
 mask_var = tk.IntVar()
 
-checkbutton_mask = tk.Checkbutton(root, text="Download Mask", variable=mask_var)
-checkbutton_mask.pack()
-
-# マージするかどうかを制御するチェックボックスと変数
 merge_var = tk.IntVar()
 checkbutton_merge = tk.Checkbutton(root, text="Merge Files", variable=merge_var)
 checkbutton_merge.pack()
