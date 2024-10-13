@@ -75,7 +75,7 @@ def merge_and_move_files(sequence_ids):
     with open('merged/reconstruction.json', 'w') as file:
         json.dump(merged_data, file, indent=2)
 
-def download_function(access_token, sequence_id, progress_var, sequence_num, should_merge):
+def download_function(access_token, sequence_id, progress_var, sequence_num, sequence_num_all ,should_merge):
     save_token_to_ini(access_token)
     header = {'Authorization': 'OAuth {}'.format(access_token)}
     try:
@@ -129,7 +129,7 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, sho
                 else:
                     image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
             current_progress = (index + 1) / total_images * 100
-            progress_label.config(text=f"sec {sequence_num}: {index + 1}/{total_images} ({current_progress:.2f}%)")
+            progress_label.config(text=f"sec {sequence_num} / {sequence_num_all} : {index + 1}/{total_images} ({current_progress:.2f}%)")
             progress_var.set((index + 1) / total_images * 100)
             root.update_idletasks()
         image_url = 'https://graph.mapillary.com/{}?fields=thumb_original_url, sfm_cluster'.format(img_id["id"])
@@ -183,7 +183,7 @@ def on_download_clicked():
         try:
             for sequence_num, sequence_id in enumerate(sequence_ids):
                 if sequence_id:
-                    download_function(access_token, sequence_id, progress_var, sequence_num + 1, should_merge)
+                    download_function(access_token, sequence_id, progress_var, sequence_num + 1, len(sequence_ids), should_merge)
             
             if should_merge and sequence_ids:
                 merge_and_move_files(sequence_ids)
