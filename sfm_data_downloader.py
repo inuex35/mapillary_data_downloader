@@ -11,7 +11,6 @@ import numpy as np
 import cv2 
 from queue import Queue
 import shutil
-from opensfm_converter import panorama2cube_image
 import threading
 sequence_entries = []
 is_cancelled = False
@@ -76,10 +75,6 @@ def merge_and_move_files(sequence_ids):
     with open('merged/reconstruction.json', 'w') as file:
         json.dump(merged_data, file, indent=2)
 
-def equi2perspective(image):
-    equi2pers = panorama2cube_image(image)
-
-
 def download_function(access_token, sequence_id, progress_var, sequence_num, should_merge):
     save_token_to_ini(access_token)
     header = {'Authorization': 'OAuth {}'.format(access_token)}
@@ -112,7 +107,6 @@ def download_function(access_token, sequence_id, progress_var, sequence_num, sho
                 if should_merge:
                     if not os.path.exists(image_dir):
                         os.makedirs(image_dir)
-                    image = panorama2cube_image(image)
                     image.save(os.path.join(image_dir, '{}.jpg'.format(image_name)), exif=exif_bytes)
                 else:
                     image_dir = os.path.join(sequence_id, 'images')
